@@ -8,7 +8,7 @@ Registers three LLM-callable tools:
 
 - **`websearch`** — search the web via one of 6 providers: [Brave](https://brave.com/search/api/), [Tavily](https://tavily.com), [Google](https://developers.google.com/custom-search), [SearXNG](https://searxng.org), [Exa](https://exa.ai), or [Parallel](https://parallel.ai)
 - **`webfetch`** — direct HTTP fetch + HTML→markdown conversion
-- **`webscreenshot`** — guarded public-page PNG capture through [Latchshot](https://latchshot.fly.dev/guides/screenshot-mcp-server.html)
+- **`webscreenshot`** — guarded public-page PNG capture through [Latchshot](https://latchshot.fly.dev/guides/url-to-screenshot-api.html)
 
 ## Install
 
