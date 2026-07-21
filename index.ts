@@ -13,6 +13,7 @@
  *   SEARXNG_BASE_URL    - SearXNG instance base URL (optional)
  *   EXA_API_KEY         - Exa search (optional, works without it)
  *   PARALLEL_API_KEY    - Parallel search (optional, works without it)
+ *   LATCHSHOT_API_KEY   - Latchshot public-page screenshots (optional)
  *
  * Override:
  *   PI_WEBSEARCH_PROVIDER=brave|tavily|google|searxng|exa|parallel
@@ -23,7 +24,7 @@
  *   PI_WEBSEARCH_CACHE      - Set to "off" to disable caching entirely
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   truncateHead,
@@ -42,6 +43,12 @@ import { isTag, type AnyNode, type Element, type Document as DomDocument } from 
 import { removeElement, textContent, getElementsByTagName, getChildren, getAttributeValue } from "domutils";
 import { render } from "dom-serializer";
 import { extractText, getMeta, getDocumentProxy } from "unpdf";
+import {
+  buildScreenshotToolResult,
+  capturePublicPage,
+  takeScreenshotSlot,
+  type ScreenshotParams,
+} from "./webscreenshot.ts";
 
 // ---------------------------------------------------------------------------
 // Provider types
@@ -665,6 +672,7 @@ function createProvider(name: ProviderName): SearchProvider {
 const MAX_RESPONSE_SIZE = 10 * 1024 * 1024 // 10MB
 const DEFAULT_FETCH_TIMEOUT = 30 * 1000 // 30 seconds
 const MAX_FETCH_TIMEOUT = 120 * 1000 // 2 minutes
+const MAX_SCREENSHOTS_PER_SESSION = 10
 
 function isImageMime(mime: string): boolean {
   return mime.startsWith("image/") && mime !== "image/svg+xml" && mime !== "image/vnd.fastbidsheet"
@@ -676,7 +684,7 @@ function isPdfMime(mime: string): boolean {
 
 async function streamResponseToBuffer(
   response: Response,
-  onUpdate?: (update: { content: Array<{ type: "text"; text: string }> }) => void,
+  onUpdate?: AgentToolUpdateCallback<unknown>,
   label = "Fetching",
 ): Promise<Buffer> {
   if (!response.body) {
@@ -710,7 +718,7 @@ async function streamResponseToBuffer(
       } else {
         msg = `${label}... ${Math.round(receivedBytes / 1024)} KB received`
       }
-      onUpdate?.({ content: [{ type: "text", text: msg }] })
+      onUpdate?.({ content: [{ type: "text", text: msg }], details: {} })
       lastReportedBytes = receivedBytes
     }
   }
@@ -1047,8 +1055,8 @@ function extractMetadata(html: string): PageMetadata {
 
   // Merge with priority: OpenGraph > JSON-LD > HTML meta
   return {
-    title: og["og:title"] || jsonLd?.headline || title || meta.description || undefined,
-    description: og["og:description"] || jsonLd?.description || meta.description || undefined,
+    title: og["og:title"] || ldString(["headline"]) || title || meta.description || undefined,
+    description: og["og:description"] || ldString(["description"]) || meta.description || undefined,
     author: og["og:article:author"] || ldAuthor() || meta.author || undefined,
     publishedDate: og["og:article:published_time"] || ldString(["datePublished"]) || meta.date || undefined,
     canonicalUrl: og["og:url"] || canonical || undefined,
@@ -1063,7 +1071,7 @@ async function fetchUrl(
   format: "text" | "markdown" | "html",
   timeoutSec?: number,
   signal?: AbortSignal,
-  onUpdate?: (update: { content: Array<{ type: "text"; text: string }> }) => void,
+  onUpdate?: AgentToolUpdateCallback<unknown>,
 ): Promise<{ content: string; contentType: string; isImage: boolean; imageMime?: string; imageBase64?: string; metadata?: PageMetadata }> {
   if (!url.startsWith("http://") && !url.startsWith("https://")) {
     throw new Error("URL must start with http:// or https://")
@@ -1155,7 +1163,7 @@ async function fetchUrl(
     if (buffer.byteLength > MAX_RESPONSE_SIZE) {
       throw new Error("Response too large (exceeds 10MB limit)")
     }
-    onUpdate?.({ content: [{ type: "text", text: `Extracting PDF text (${Math.round(buffer.byteLength / 1024)} KB)...` }] })
+    onUpdate?.({ content: [{ type: "text", text: `Extracting PDF text (${Math.round(buffer.byteLength / 1024)} KB)...` }], details: {} })
     const pdfResult = await extractTextFromPDF(buffer)
 
     let content = pdfResult.text
@@ -1200,7 +1208,7 @@ async function fetchUrl(
         } else {
           msg = `Fetching... ${Math.round(receivedBytes / 1024)} KB received`
         }
-        onUpdate?.({ content: [{ type: "text", text: msg }] })
+        onUpdate?.({ content: [{ type: "text", text: msg }], details: {} })
         lastReportedBytes = receivedBytes
       }
     }
@@ -1299,6 +1307,22 @@ const WebFetchParams = Type.Object({
   ),
 });
 
+const WebScreenshotParams = Type.Object({
+  url: Type.String({ description: "Public http:// or https:// webpage to capture" }),
+  width: Type.Optional(
+    Type.Number({ minimum: 320, maximum: 2560, description: "Viewport width in pixels (default: 1280)" }),
+  ),
+  height: Type.Optional(
+    Type.Number({ minimum: 240, maximum: 1440, description: "Viewport height in pixels (default: 720)" }),
+  ),
+  fullPage: Type.Optional(
+    Type.Boolean({ description: "Capture the full scrollable page (default: false)" }),
+  ),
+  timeout: Type.Optional(
+    Type.Number({ minimum: 3, maximum: 30, description: "Browser timeout in seconds (default/max: 30)" }),
+  ),
+});
+
 export default function webSearchExtension(pi: ExtensionAPI) {
   const year = new Date().getFullYear();
 
@@ -1315,6 +1339,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
     cacheTtlSec * 1000,   // convert to ms
     cacheMaxEntries,
   );
+  const screenshotCounts = new Map<string, number>();
 
   // --- websearch ---
 
@@ -1381,6 +1406,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
           content: [
             { type: "text", text: `Searching via ${providerName}: "${params.query}"${dateInfo}...` },
           ],
+          details: {},
         });
 
         try {
@@ -1414,6 +1440,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
                   text: `⚠ ${lastError.message}. ${providersToTry.indexOf(providerName) < providersToTry.length - 1 ? "Trying next provider..." : ""}`,
                 },
               ],
+              details: {},
             });
             // Continue to next provider
             continue;
@@ -1426,6 +1453,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
               content: [
                 { type: "text", text: `⚠ ${lastError.message}. Trying next provider...` },
               ],
+              details: {},
             });
             continue;
           }
@@ -1482,6 +1510,50 @@ export default function webSearchExtension(pi: ExtensionAPI) {
     },
   });
 
+  // --- webscreenshot (guarded public-page rendering via Latchshot) ---
+
+  pi.registerTool({
+    name: "webscreenshot",
+    label: "Web Screenshot",
+    description: [
+      "Capture a public HTTP/HTTPS webpage as a PNG image attachment.",
+      "Use for visual verification, UI review, or JavaScript-rendered pages when text fetch is insufficient.",
+      "The hosted renderer blocks private networks and does not support cookies, login sessions, arbitrary scripts, selectors, CAPTCHA solving, or anti-bot bypass.",
+    ].join("\n"),
+    promptSnippet: "Capture a public webpage as an image",
+    promptGuidelines: [
+      "Use webscreenshot only when visual page evidence is materially useful.",
+      "Capture only public pages the user is authorized to inspect.",
+      "Do not use it for authenticated, private-network, or interaction-dependent pages.",
+    ],
+    parameters: WebScreenshotParams,
+
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const sessionId = ctx.sessionManager.getSessionFile() ?? "unsaved-session"
+      takeScreenshotSlot(screenshotCounts, sessionId, MAX_SCREENSHOTS_PER_SESSION)
+
+      const result = await capturePublicPage(params as ScreenshotParams, signal ?? undefined, onUpdate)
+      return buildScreenshotToolResult(params as ScreenshotParams, result)
+    },
+
+    renderCall(args, theme, _context) {
+      let text = theme.fg("toolTitle", theme.bold("webscreenshot "))
+      const url = args.url.length > 72 ? `${args.url.slice(0, 69)}...` : args.url
+      text += theme.fg("accent", url)
+      text += theme.fg("dim", ` ${args.width ?? 1280}×${args.height ?? 720}${args.fullPage ? " full page" : ""}`)
+      return new Text(text, 0, 0)
+    },
+
+    renderResult(result, { isPartial }, theme, _context) {
+      const content = result.content[0]
+      const text = content?.type === "text" ? content.text : ""
+      if (isPartial) return new Text(theme.fg("warning", text || "⏳ Capturing..."), 0, 0)
+      const details = result.details as { bytes?: number; renderMs?: string } | undefined
+      const suffix = details?.renderMs ? ` in ${details.renderMs} ms` : ""
+      return new Text(theme.fg("success", `✓ Screenshot attached${suffix}`), 0, 0)
+    },
+  });
+
   // --- webfetch (same approach as opencode) ---
 
   pi.registerTool({
@@ -1507,6 +1579,7 @@ export default function webSearchExtension(pi: ExtensionAPI) {
         content: [
           { type: "text", text: `Fetching ${params.url} (${format})...` },
         ],
+        details: {},
       });
 
       const result = await fetchUrl(params.url, format, params.timeout, signal ?? undefined, onUpdate);

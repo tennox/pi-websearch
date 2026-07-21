@@ -14,8 +14,12 @@
   "author": "alfonzjanfrithz",
   "type": "module",
   "main": "index.ts",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "files": [
     "index.ts",
+    "webscreenshot.ts",
     "README.md",
     "LICENSE"
   ],

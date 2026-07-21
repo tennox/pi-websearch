@@ -4,10 +4,11 @@ Web search and URL content fetching tools for [Pi](https://pi.dev) coding agent.
 
 Adapted from [opencode](https://github.com/sst/opencode)'s [`websearch.ts`](https://github.com/sst/opencode/blob/dev/packages/opencode/src/tool/websearch.ts), [`mcp-websearch.ts`](https://github.com/sst/opencode/blob/dev/packages/opencode/src/tool/mcp-websearch.ts), and [`webfetch.ts`](https://github.com/sst/opencode/blob/dev/packages/opencode/src/tool/webfetch.ts).
 
-Registers two LLM-callable tools:
+Registers three LLM-callable tools:
 
 - **`websearch`** — search the web via one of 6 providers: [Brave](https://brave.com/search/api/), [Tavily](https://tavily.com), [Google](https://developers.google.com/custom-search), [SearXNG](https://searxng.org), [Exa](https://exa.ai), or [Parallel](https://parallel.ai)
 - **`webfetch`** — direct HTTP fetch + HTML→markdown conversion
+- **`webscreenshot`** — guarded public-page PNG capture through [Latchshot](https://latchshot.fly.dev/guides/url-to-screenshot-api.html)
 
 ## Install
 
@@ -35,6 +36,7 @@ pi install git:github.com/alfonzjanfrithz/pi-websearch
 | `PI_WEBSEARCH_CACHE_TTL` | Cache time-to-live in seconds | No — default: `300` (5 minutes) |
 | `PI_WEBSEARCH_CACHE_MAX` | Maximum number of cached search results | No — default: `100` |
 | `PI_WEBSEARCH_CACHE` | Set to `off` to disable caching entirely | No — enabled by default |
+| `LATCHSHOT_API_KEY` | Bearer key for `webscreenshot`; [100 successful renders renew each UTC month](https://latchshot.fly.dev/?intent=piwebsearch#trial) | Required only for `webscreenshot` |
 
 Provider selection logic:
 
@@ -100,6 +102,20 @@ Fetch a URL and extract its content.
 | `format` | `"text"` \| `"markdown"` \| `"html"` | no | Output format (default: `"markdown"`) |
 | `timeout` | number | no | Timeout in seconds (max 120) |
 
+### `webscreenshot`
+
+Capture one public webpage as an inline PNG attachment. The extension sends the key only to the fixed HTTPS Latchshot endpoint and never places it in the URL, tool result, or logs.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `url` | string | yes | Public HTTP/HTTPS page to capture |
+| `width` | number | no | Viewport width, 320–2560 (default: 1280) |
+| `height` | number | no | Viewport height, 240–1440 (default: 720) |
+| `fullPage` | boolean | no | Capture the full scrollable page (default: false) |
+| `timeout` | number | no | Browser timeout in seconds, 3–30 (default: 30) |
+
+The tool is limited to 10 capture attempts per Pi session. Only successful renders consume Latchshot quota. It supports public pages only: private/loopback/special-use networks, cookies, login sessions, arbitrary scripts, CSS-selector crops, CAPTCHA solving, proxy rotation, and anti-bot bypass are not supported. The user remains responsible for permission to capture the target page.
+
 **Metadata extraction** — When fetching HTML pages, `webfetch` automatically extracts structured metadata and includes it in the result:
 
 | Field | Source |
@@ -122,6 +138,7 @@ Fetch a URL and extract its content.
 - HTML→markdown via `turndown`, text extraction via `htmlparser2`
 - Cloudflare bot detection retry (honest UA fallback)
 - Image support (returned as base64 attachments)
+- Public-page screenshots returned as base64 PNG attachments
 - Output truncation (50KB / 2000 lines, overflow saved to temp file)
 - Automatic page metadata extraction (OpenGraph, JSON-LD structured data, HTML meta tags)
 - Search result caching with TTL-based expiry and LRU eviction (Issue #2)
