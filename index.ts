@@ -11,12 +11,13 @@
  *   GOOGLE_API_KEY      - Google Custom Search JSON API key (optional)
  *   GOOGLE_CX           - Google Programmable Search Engine ID (optional)
  *   SEARXNG_BASE_URL    - SearXNG instance base URL (optional)
- *   EXA_API_KEY         - Exa search (optional, works without it)
+ *   KAGI_API_KEY         - Kagi Search API v1 key (optional; else secrets/kagi_token
+ *                          next to this file, seeded from gopass shared/ops/kagi/token)
  *   PARALLEL_API_KEY    - Parallel search (optional, works without it)
  *   LATCHSHOT_API_KEY   - Latchshot public-page screenshots (optional)
  *
  * Override:
- *   PI_WEBSEARCH_PROVIDER=brave|tavily|google|searxng|exa|parallel
+ *   PI_WEBSEARCH_PROVIDER=brave|kagi|tavily|google|searxng|exa|parallel
  *
  * Cache (Issue #2):
  *   PI_WEBSEARCH_CACHE_TTL  - Cache TTL in seconds (default: 300 / 5 minutes, 0 = disabled)
@@ -34,8 +35,10 @@ import {
   keyHint,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { writeFileSync, mkdtempSync } from "node:fs";
-import { join } from "node:path";
+import { writeFileSync, mkdtempSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import TurndownService from "turndown";
 import { Parser, parseDocument } from "htmlparser2";
@@ -54,7 +57,7 @@ import {
 // Provider types
 // ---------------------------------------------------------------------------
 
-type ProviderName = "brave" | "tavily" | "google" | "searxng" | "exa" | "parallel";
+type ProviderName = "brave" | "tavily" | "google" | "searxng" | "exa" | "parallel" | "kagi";
 type DateRange = "last_day" | "last_week" | "last_month" | "last_3m" | "last_6m" | "last_9m" | "last_year" | "ytd";
 
 /**
@@ -116,6 +119,8 @@ const DATE_RANGE_MAP: Record<string, Partial<Record<DateRange, Record<string, st
   exa: {},
   // Parallel doesn't support date filtering — silently ignored
   parallel: {},
+  // Kagi uses filters.after ISO date computation — handled by resolveDateParams()
+  kagi: {},
 };
 
 /** Day offsets for computing ISO date boundaries (Exa-style providers). */
@@ -197,6 +202,9 @@ function resolveDateParams(provider: string, dateRange?: DateRange): Record<stri
   if (provider in DATE_RANGE_MAP) {
     const days = dateRange === "ytd" ? ytdDays() : DATE_RANGE_DAYS[dateRange];
     const startDate = new Date(Date.now() - days * 86400000);
+    if (provider === "kagi") {
+      return { after: startDate.toISOString().slice(0, 10) };  // YYYY-MM-DD
+    }
     return { startPublishedDate: startDate.toISOString() };
   }
 
@@ -211,9 +219,11 @@ interface SearchProvider {
 }
 
 class SearchError extends Error {
-  constructor(message: string, public readonly code: string) {
+  readonly code: string;
+  constructor(message: string, code: string) {
     super(message);
     this.name = "SearchError";
+    this.code = code;
   }
 }
 
@@ -242,7 +252,7 @@ class SearchServerError extends SearchError {
 // Provider priority (higher = tried first during auto-selection and fallback)
 // ---------------------------------------------------------------------------
 
-const PROVIDER_PRIORITY: ProviderName[] = ["brave", "tavily", "google", "searxng", "exa", "parallel"];
+const PROVIDER_PRIORITY: ProviderName[] = ["brave", "kagi", "tavily", "google", "searxng", "exa", "parallel"];
 
 // ---------------------------------------------------------------------------
 // Deterministic provider selection
@@ -263,6 +273,7 @@ function isProviderName(value: string): value is ProviderName {
 function getAvailableProviders(): ProviderName[] {
   const available: ProviderName[] = [];
   if (process.env.BRAVE_API_KEY) available.push("brave");
+  if (kagiKeySync()) available.push("kagi");
   if (process.env.TAVILY_API_KEY) available.push("tavily");
   if (process.env.GOOGLE_API_KEY && process.env.GOOGLE_CX) available.push("google");
   if (process.env.SEARXNG_BASE_URL) available.push("searxng");
@@ -306,12 +317,15 @@ interface CacheEntry {
 
 class SearchCache {
   private cache = new Map<string, CacheEntry>();
+  private readonly enabled: boolean;
+  private readonly ttlMs: number;
+  private readonly maxEntries: number;
 
-  constructor(
-    private readonly enabled: boolean,
-    private readonly ttlMs: number,
-    private readonly maxEntries: number,
-  ) {}
+  constructor(enabled: boolean, ttlMs: number, maxEntries: number) {
+    this.enabled = enabled;
+    this.ttlMs = ttlMs;
+    this.maxEntries = maxEntries;
+  }
 
   private makeKey(provider: string, query: string, dateRange: string | undefined, numResults: number): string {
     return `${provider}:${query.toLowerCase().trim()}:${dateRange ?? "none"}:${numResults}`;
@@ -464,6 +478,79 @@ async function safeFetch(url: string, init: RequestInit, provider: string): Prom
 // ---------------------------------------------------------------------------
 // Search providers
 // ---------------------------------------------------------------------------
+
+/**
+ * Kagi API key: $KAGI_API_KEY, else secrets/kagi_token next to this file
+ * (gitignored; seed from gopass: gopass show -o shared/ops/kagi/token > secrets/kagi_token).
+ */
+function kagiTokenFilePath(): string {
+  // import.meta.url points at this file (or its compiled location)
+  return join(dirname(fileURLToPath(import.meta.url)), "secrets", "kagi_token");
+}
+
+async function kagiKey(): Promise<string> {
+  const env = process.env.KAGI_API_KEY?.trim();
+  if (env) return env;
+  try {
+    const fromFile = (await readFile(kagiTokenFilePath(), "utf8")).trim();
+    if (fromFile) return fromFile;
+  } catch {
+    // no token file — fall through
+  }
+  return "";
+}
+
+function kagiKeySync(): boolean {
+  if (process.env.KAGI_API_KEY?.trim()) return true;
+  try {
+    return statSync(kagiTokenFilePath()).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function searchKagi(
+  query: string,
+  numResults?: number,
+  dateRange?: DateRange,
+  signal?: AbortSignal,
+): Promise<string> {
+  const key = await kagiKey();
+  if (!key) throw new SearchError("Kagi key not set (set $KAGI_API_KEY or secrets/kagi_token next to index.ts)", "CONFIG");
+
+  const body: Record<string, unknown> = { query, workflow: "search", format: "json" };
+  if (numResults) body.limit = Math.min(numResults, 1024);
+  const dateParams = resolveDateParams("kagi", dateRange);
+  if (Object.keys(dateParams).length > 0) body.filters = dateParams;
+
+  const response = await safeFetch(
+    "https://kagi.com/api/v1/search",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+      signal,
+    },
+    "kagi",
+  );
+
+  const data = (await response.json()) as {
+    errors?: Array<{ message?: string }>;
+    data?: { search?: Array<{ title?: string; url?: string; snippet?: string; time?: string }> };
+  };
+  // v1 quirk: API-level failures come back as HTTP 200 with errors[] (plural)
+  if (data.errors?.length) {
+    const msg = data.errors.map((e) => e.message ?? JSON.stringify(e)).join("; ");
+    if (/unauthor/i.test(msg)) throw new SearchAuthError("kagi", 200);
+    if (/rate/i.test(msg)) throw new SearchRateLimitError("kagi");
+    throw new SearchError(`kagi api error: ${msg}`, "API_ERROR");
+  }
+
+  const results = data.data?.search ?? [];
+  return formatSearchResults(
+    results.map((r) => ({ title: r.title, url: r.url, snippet: r.snippet })),
+  );
+}
 
 function exaUrl(): string {
   const key = process.env.EXA_API_KEY;
@@ -649,6 +736,7 @@ function createProvider(name: ProviderName): SearchProvider {
         case "searxng": return !!process.env.SEARXNG_BASE_URL;
         case "exa": return true;
         case "parallel": return true;
+        case "kagi": return kagiKeySync();
       }
     },
     search(query, numResults, sessionId, signal, dateRange) {
@@ -660,6 +748,7 @@ function createProvider(name: ProviderName): SearchProvider {
         case "searxng": return searchSearxng(query, numResults, dateRange);
         case "exa": return searchExa(query, numResults, dateRange);
         case "parallel": return searchParallel(query, sessionId, dateRange);
+        case "kagi": return searchKagi(query, numResults, dateRange, signal);
       }
     },
   };

@@ -6,7 +6,7 @@ Adapted from [opencode](https://github.com/sst/opencode)'s [`websearch.ts`](http
 
 Registers three LLM-callable tools:
 
-- **`websearch`** — search the web via one of 6 providers: [Brave](https://brave.com/search/api/), [Tavily](https://tavily.com), [Google](https://developers.google.com/custom-search), [SearXNG](https://searxng.org), [Exa](https://exa.ai), or [Parallel](https://parallel.ai)
+- **`websearch`** — search the web via one of 7 providers: [Brave](https://brave.com/search/api/), [Kagi](https://kagi.com/api), [Tavily](https://tavily.com), [Google](https://developers.google.com/custom-search), [SearXNG](https://searxng.org), [Exa](https://exa.ai), or [Parallel](https://parallel.ai)
 - **`webfetch`** — direct HTTP fetch + HTML→markdown conversion
 - **`webscreenshot`** — guarded public-page PNG capture through [Latchshot](https://latchshot.fly.dev/guides/url-to-screenshot-api.html)
 
@@ -25,13 +25,14 @@ pi install git:github.com/alfonzjanfrithz/pi-websearch
 | Variable | Description | Required |
 |---|---|---|
 | `BRAVE_API_KEY` | [Brave Search API](https://brave.com/search/api/) key | No — optional |
+| `KAGI_API_KEY` | [Kagi Search API](https://kagi.com/api) v1 key; alternatively put the token in `secrets/kagi_token` next to `index.ts` | No — optional |
 | `TAVILY_API_KEY` | [Tavily Search API](https://tavily.com) key | No — optional |
 | `GOOGLE_API_KEY` | [Google Custom Search JSON API](https://developers.google.com/custom-search) key | No — optional (requires `GOOGLE_CX`) |
 | `GOOGLE_CX` | Google Programmable Search Engine ID | No — optional (requires `GOOGLE_API_KEY`) |
 | `SEARXNG_BASE_URL` | [SearXNG](https://searxng.org) instance URL (e.g. `https://searx.be`) | No — optional |
 | `EXA_API_KEY` | [Exa](https://exa.ai) API key | No — works without |
 | `PARALLEL_API_KEY` | [Parallel](https://parallel.ai) API key | No — works without |
-| `PI_WEBSEARCH_PROVIDER` | Force a provider: `brave`, `tavily`, `google`, `searxng`, `exa`, or `parallel` | No — auto-selects |
+| `PI_WEBSEARCH_PROVIDER` | Force a provider: `brave`, `kagi`, `tavily`, `google`, `searxng`, `exa`, or `parallel` | No — auto-selects |
 | `PI_WEBSEARCH_DATE_RANGE` | Set to `0` to disable date range filtering entirely | No — enabled by default |
 | `PI_WEBSEARCH_CACHE_TTL` | Cache time-to-live in seconds | No — default: `300` (5 minutes) |
 | `PI_WEBSEARCH_CACHE_MAX` | Maximum number of cached search results | No — default: `100` |
@@ -43,6 +44,7 @@ Provider selection logic:
 1. `PI_WEBSEARCH_PROVIDER` override → that provider
 2. No override set → pick the highest-priority provider with configured credentials:
    - `BRAVE_API_KEY` → Brave
+   - `KAGI_API_KEY` (or `secrets/kagi_token`) → Kagi
    - `TAVILY_API_KEY` → Tavily
    - `GOOGLE_API_KEY` + `GOOGLE_CX` → Google
    - `SEARXNG_BASE_URL` → SearXNG
