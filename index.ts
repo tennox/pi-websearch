@@ -39,6 +39,7 @@ import { writeFileSync, mkdtempSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import TurndownService from "turndown";
 import { Parser, parseDocument } from "htmlparser2";
@@ -481,32 +482,55 @@ async function safeFetch(url: string, init: RequestInit, provider: string): Prom
 
 /**
  * Kagi API key: $KAGI_API_KEY, else secrets/kagi_token next to this file
- * (gitignored; seed from gopass: gopass show -o shared/ops/kagi/token > secrets/kagi_token).
+ * (gitignored; seed from gopass: gopass show -o shared/ops/kagi/token > secrets/kagi_token),
+ * else <git-root>/secrets/kagi_token (repo-local token, works from any cwd
+ * inside the repo).
  */
-function kagiTokenFilePath(): string {
-  // import.meta.url points at this file (or its compiled location)
-  return join(dirname(fileURLToPath(import.meta.url)), "secrets", "kagi_token");
+function kagiTokenFilePaths(): string[] {
+  // import.meta.url points at this file (or its compiled location) — the
+  // package dir when installed via nix/npm. The git-root path covers
+  // repo-local token files without a fixed absolute path.
+  const paths = [join(dirname(fileURLToPath(import.meta.url)), "secrets", "kagi_token")];
+  try {
+    const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    }).trim();
+    if (gitRoot) {
+      paths.push(join(gitRoot, "secrets", "kagi_token"));
+      // nix-config layout: skill token under home/_common/features/ai/skills/
+      paths.push(join(gitRoot, "home", "_common", "features", "ai", "skills", "websearch", "secrets", "kagi_token"));
+    }
+  } catch {
+    // not in a git repo — skip
+  }
+  return paths;
 }
 
 async function kagiKey(): Promise<string> {
   const env = process.env.KAGI_API_KEY?.trim();
   if (env) return env;
-  try {
-    const fromFile = (await readFile(kagiTokenFilePath(), "utf8")).trim();
-    if (fromFile) return fromFile;
-  } catch {
-    // no token file — fall through
+  for (const path of kagiTokenFilePaths()) {
+    try {
+      const fromFile = (await readFile(path, "utf8")).trim();
+      if (fromFile) return fromFile;
+    } catch {
+      // no token file at this path — try next
+    }
   }
   return "";
 }
 
 function kagiKeySync(): boolean {
   if (process.env.KAGI_API_KEY?.trim()) return true;
-  try {
-    return statSync(kagiTokenFilePath()).size > 0;
-  } catch {
-    return false;
-  }
+  return kagiTokenFilePaths().some((p) => {
+    try {
+      return statSync(p).size > 0;
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function searchKagi(
