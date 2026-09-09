@@ -40,7 +40,7 @@ import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import TurndownService from "turndown";
 import { Parser, parseDocument } from "htmlparser2";
 import { isTag, type AnyNode, type Element, type Document as DomDocument } from "domhandler";
@@ -488,9 +488,13 @@ async function safeFetch(url: string, init: RequestInit, provider: string): Prom
  */
 function kagiTokenFilePaths(): string[] {
   // import.meta.url points at this file (or its compiled location) — the
-  // package dir when installed via nix/npm. The git-root path covers
-  // repo-local token files without a fixed absolute path.
+  // package dir when installed via nix/npm. Repo-local token files are
+  // covered by: $HOME/dev/nix/config (manu's nix-config checkout, the
+  // canonical token location), the cwd's git root, and the skill dir's
+  // secrets folder (same file the websearch skill uses).
   const paths = [join(dirname(fileURLToPath(import.meta.url)), "secrets", "kagi_token")];
+  paths.push(join(homedir(), "dev", "nix", "config", "home", "_common", "features", "ai", "skills", "websearch", "secrets", "kagi_token"));
+  paths.push(join(homedir(), ".cache", "kagi-token"));
   try {
     const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       cwd: process.cwd(),
